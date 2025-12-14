@@ -1,12 +1,12 @@
 # Hospital Patient Billing System - Installation Guide
 
-## 📋 System Overview
+## System Overview
 
 This project provides two implementations of a Hospital Patient Billing System:
 1. **C Console Version** - Terminal-based application (kernel/)
 2. **Python GUI Version** - Graphical user interface (gui/)
 
-## 🖥️ System Requirements
+## System Requirements
 
 ### For C Version:
 - GCC compiler (MinGW on Windows)
@@ -18,7 +18,7 @@ This project provides two implementations of a Hospital Patient Billing System:
 - Tkinter (usually included with Python)
 - SQLite3 (included with Python)
 
-## ⚡ Quick Installation
+## Quick Installation
 
 ### Option 1: Install Both Versions
 
