@@ -4,7 +4,7 @@ A complete patient billing system available in both **GUI** (Python) and **Comma
 
 ##  Features
 
-- **Add, view, and search patients**
+- **Add, view and search patients**
 - **Generate bills** with multiple charge categories (room, doctor, medicine, lab, other)
 - **Process payments** and track balances
 - **Generate financial reports**
