@@ -1,0 +1,9 @@
+# Required packages for the Hospital Billing System
+# Install with: pip install -r requirements.txt
+
+# Core GUI and Database
+tkinter  # Usually comes with Python
+sqlite3  # Usually comes with Python
+
+# Optional for enhanced features
+Pillow>=9.0.0  # For image handling if you add icons
