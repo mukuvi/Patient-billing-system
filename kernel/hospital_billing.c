@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <termios.h>
 #include <unistd.h>
+#include <locale.h>
 
 // Database connection
 sqlite3* db = NULL;
@@ -49,7 +50,13 @@ void get_string(const char *prompt, char *buffer, size_t size);
 int get_integer(const char *prompt, int min, int max);
 float get_float(const char *prompt, float min, float max);
 
+// NEW: Security functions to prevent SQL injection
+void escape_string(char *dest, const char *src, size_t size);
+
 int main() {
+    // Set locale for proper character handling
+    setlocale(LC_ALL, "en_US.UTF-8");
+    
     printf("\n========================================\n");
     printf("   HOSPITAL PATIENT BILLING SYSTEM\n");
     printf("========================================\n");
@@ -106,6 +113,9 @@ void init_database() {
         exit(1);
     }
     
+    // Set UTF-8 encoding for the database
+    sqlite3_exec(db, "PRAGMA encoding = 'UTF-8';", 0, 0, 0);
+    
     // Create tables
     const char *sql = 
         "CREATE TABLE IF NOT EXISTS users ("
@@ -117,7 +127,7 @@ void init_database() {
         
         "CREATE TABLE IF NOT EXISTS patients ("
         "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "    name TEXT NOT NULL,"
+        "    name TEXT NOT NULL COLLATE NOCASE,"
         "    age INTEGER,"
         "    gender TEXT,"
         "    contact TEXT,"
@@ -142,7 +152,7 @@ void init_database() {
         "    balance_due REAL DEFAULT 0,"
         "    payment_status TEXT DEFAULT 'Pending',"
         "    payment_method TEXT,"
-        "    FOREIGN KEY (patient_id) REFERENCES patients(id)"
+        "    FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE"
         ");"
         
         "CREATE TABLE IF NOT EXISTS payments ("
@@ -151,7 +161,7 @@ void init_database() {
         "    amount REAL,"
         "    payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
         "    payment_method TEXT,"
-        "    FOREIGN KEY (bill_no) REFERENCES bills(bill_no)"
+        "    FOREIGN KEY (bill_no) REFERENCES bills(bill_no) ON DELETE CASCADE"
         ");";
     
     char *err_msg = 0;
@@ -160,6 +170,9 @@ void init_database() {
         printf("SQL error: %s\n", err_msg);
         sqlite3_free(err_msg);
     }
+    
+    // Enable foreign keys
+    sqlite3_exec(db, "PRAGMA foreign_keys = ON;", 0, 0, 0);
     
     // Insert default admin user if not exists
     sql = "INSERT OR IGNORE INTO users (username, password, role) VALUES "
@@ -174,6 +187,23 @@ void close_database() {
     if (db) {
         sqlite3_close(db);
     }
+}
+
+// ==================== SECURITY FUNCTIONS ====================
+
+void escape_string(char *dest, const char *src, size_t size) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] != '\0' && j < size - 1; i++) {
+        if (src[i] == '\'') {
+            if (j < size - 2) {
+                dest[j++] = '\'';
+                dest[j++] = '\'';
+            }
+        } else {
+            dest[j++] = src[i];
+        }
+    }
+    dest[j] = '\0';
 }
 
 // ==================== AUTHENTICATION ====================
@@ -194,12 +224,8 @@ int authenticate() {
     printf("Password: ");
     get_password(password, sizeof(password));
     
-    // Query database for user
-    char sql[200];
-    snprintf(sql, sizeof(sql), 
-             "SELECT role FROM users WHERE username = '%s' AND password = '%s'", 
-             username, password);
-    
+    // Use parameterized query to prevent SQL injection
+    const char *sql = "SELECT role FROM users WHERE username = ? AND password = ?";
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
     
@@ -207,6 +233,9 @@ int authenticate() {
         printf("Authentication error\n");
         return 0;
     }
+    
+    sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, password, -1, SQLITE_STATIC);
     
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *role = (const char*)sqlite3_column_text(stmt, 0);
@@ -223,7 +252,7 @@ int authenticate() {
 void get_password(char *password, size_t size) {
     struct termios oldt, newt;
     int i = 0;
-    char ch;
+    int ch;
     
     // Get current terminal settings
     tcgetattr(STDIN_FILENO, &oldt);
@@ -239,7 +268,7 @@ void get_password(char *password, size_t size) {
         if (ch == '\n' || ch == '\r') {
             break;
         }
-        password[i++] = ch;
+        password[i++] = (char)ch;
         printf("*");
     }
     password[i] = '\0';
@@ -376,23 +405,37 @@ void add_patient() {
         strftime(admission_date, sizeof(admission_date), "%Y-%m-%d", tm);
     }
     
-    // Insert into database
-    char sql[500];
-    snprintf(sql, sizeof(sql),
-        "INSERT INTO patients (name, age, gender, contact, address, disease, admission_date) "
-        "VALUES ('%s', %d, '%s', '%s', '%s', '%s', '%s')",
-        name, age, gender, contact, address, disease, admission_date);
-    
-    char *err_msg = 0;
-    int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
+    // Use parameterized query to prevent SQL injection and handle UTF-8
+    const char *sql = "INSERT INTO patients (name, age, gender, contact, address, disease, admission_date) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
     
     if (rc != SQLITE_OK) {
-        printf("\n❌ Error adding patient: %s\n", err_msg);
-        sqlite3_free(err_msg);
+        printf("\n❌ Database error: %s\n", sqlite3_errmsg(db));
+        printf("\nPress Enter to continue...");
+        getchar();
+        return;
+    }
+    
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, age);
+    sqlite3_bind_text(stmt, 3, gender, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, contact, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, address, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, disease, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, admission_date, -1, SQLITE_STATIC);
+    
+    rc = sqlite3_step(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        printf("\n❌ Error adding patient: %s\n", sqlite3_errmsg(db));
     } else {
         printf("\n✅ Patient added successfully!\n");
         printf("   Patient ID: %lld\n", sqlite3_last_insert_rowid(db));
     }
+    
+    sqlite3_finalize(stmt);
     
     printf("\nPress Enter to continue...");
     getchar();
@@ -406,7 +449,7 @@ void view_patients() {
     sqlite3_stmt *stmt;
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
-        printf("Error fetching patients\n");
+        printf("Error fetching patients: %s\n", sqlite3_errmsg(db));
         printf("\nPress Enter to continue...");
         getchar();
         return;
@@ -419,14 +462,17 @@ void view_patients() {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         count++;
         int id = sqlite3_column_int(stmt, 0);
-        const char *name = (const char*)sqlite3_column_text(stmt, 1);
+        const unsigned char *name = sqlite3_column_text(stmt, 1);
         int age = sqlite3_column_int(stmt, 2);
-        const char *gender = (const char*)sqlite3_column_text(stmt, 3);
-        const char *contact = (const char*)sqlite3_column_text(stmt, 4);
-        const char *admission_date = (const char*)sqlite3_column_text(stmt, 5);
+        const unsigned char *gender = sqlite3_column_text(stmt, 3);
+        const unsigned char *contact = sqlite3_column_text(stmt, 4);
+        const unsigned char *admission_date = sqlite3_column_text(stmt, 5);
         
         printf("%-4d %-30s %-3d %-6s %-12s %s\n", 
-               id, name, age, gender, contact, admission_date);
+               id, name ? (const char*)name : "N/A", 
+               age, gender ? (const char*)gender : "N/A", 
+               contact ? (const char*)contact : "N/A", 
+               admission_date ? (const char*)admission_date : "N/A");
     }
     
     sqlite3_finalize(stmt);
@@ -458,24 +504,41 @@ void search_patient() {
     fgets(search_term, sizeof(search_term), stdin);
     search_term[strcspn(search_term, "\n")] = 0;
     
-    char sql[500];
-    if (choice == 1) {
-        snprintf(sql, sizeof(sql), 
-                 "SELECT * FROM patients WHERE name LIKE '%%%s%%' ORDER BY name", search_term);
-    } else if (choice == 2) {
-        snprintf(sql, sizeof(sql), 
-                 "SELECT * FROM patients WHERE contact LIKE '%%%s%%'", search_term);
-    } else {
-        snprintf(sql, sizeof(sql), 
-                 "SELECT * FROM patients WHERE id = %s", search_term);
-    }
-    
+    const char *sql;
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
-        printf("Search failed\n");
-        printf("\nPress Enter to continue...");
-        getchar();
-        return;
+    
+    if (choice == 1) {
+        sql = "SELECT * FROM patients WHERE name LIKE ? ORDER BY name";
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+            printf("Search failed: %s\n", sqlite3_errmsg(db));
+            printf("\nPress Enter to continue...");
+            getchar();
+            return;
+        }
+        char pattern[150];
+        snprintf(pattern, sizeof(pattern), "%%%s%%", search_term);
+        sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_STATIC);
+    } else if (choice == 2) {
+        sql = "SELECT * FROM patients WHERE contact LIKE ?";
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+            printf("Search failed: %s\n", sqlite3_errmsg(db));
+            printf("\nPress Enter to continue...");
+            getchar();
+            return;
+        }
+        char pattern[150];
+        snprintf(pattern, sizeof(pattern), "%%%s%%", search_term);
+        sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_STATIC);
+    } else {
+        sql = "SELECT * FROM patients WHERE id = ?";
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+            printf("Search failed: %s\n", sqlite3_errmsg(db));
+            printf("\nPress Enter to continue...");
+            getchar();
+            return;
+        }
+        int id = atoi(search_term);
+        sqlite3_bind_int(stmt, 1, id);
     }
     
     printf("\nSearch Results:\n");
@@ -485,21 +548,21 @@ void search_patient() {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         found = 1;
         int id = sqlite3_column_int(stmt, 0);
-        const char *name = (const char*)sqlite3_column_text(stmt, 1);
+        const unsigned char *name = sqlite3_column_text(stmt, 1);
         int age = sqlite3_column_int(stmt, 2);
-        const char *gender = (const char*)sqlite3_column_text(stmt, 3);
-        const char *contact = (const char*)sqlite3_column_text(stmt, 4);
-        const char *address = (const char*)sqlite3_column_text(stmt, 5);
-        const char *disease = (const char*)sqlite3_column_text(stmt, 6);
-        const char *admission_date = (const char*)sqlite3_column_text(stmt, 7);
+        const unsigned char *gender = sqlite3_column_text(stmt, 3);
+        const unsigned char *contact = sqlite3_column_text(stmt, 4);
+        const unsigned char *address = sqlite3_column_text(stmt, 5);
+        const unsigned char *disease = sqlite3_column_text(stmt, 6);
+        const unsigned char *admission_date = sqlite3_column_text(stmt, 7);
         
         printf("\nPatient ID: %d\n", id);
-        printf("Name: %s\n", name);
-        printf("Age: %d | Gender: %s\n", age, gender);
-        printf("Contact: %s\n", contact);
-        printf("Address: %s\n", address);
-        printf("Disease: %s\n", disease);
-        printf("Admission Date: %s\n", admission_date);
+        printf("Name: %s\n", name ? (const char*)name : "N/A");
+        printf("Age: %d | Gender: %s\n", age, gender ? (const char*)gender : "N/A");
+        printf("Contact: %s\n", contact ? (const char*)contact : "N/A");
+        printf("Address: %s\n", address ? (const char*)address : "N/A");
+        printf("Disease: %s\n", disease ? (const char*)disease : "N/A");
+        printf("Admission Date: %s\n", admission_date ? (const char*)admission_date : "N/A");
         printf("────────────────────────────────────────────────\n");
     }
     
@@ -520,10 +583,9 @@ void update_patient() {
     int patient_id = get_integer("Enter Patient ID to update: ", 1, 99999);
     
     // First, get current patient info
-    char sql[500];
-    snprintf(sql, sizeof(sql), "SELECT * FROM patients WHERE id = %d", patient_id);
-    
+    const char *sql = "SELECT * FROM patients WHERE id = ?";
     sqlite3_stmt *stmt;
+    
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK || 
         sqlite3_step(stmt) != SQLITE_ROW) {
         printf("Patient not found!\n");
@@ -533,22 +595,22 @@ void update_patient() {
         return;
     }
     
-    const char *current_name = (const char*)sqlite3_column_text(stmt, 1);
+    const unsigned char *current_name = sqlite3_column_text(stmt, 1);
     int current_age = sqlite3_column_int(stmt, 2);
-    const char *current_gender = (const char*)sqlite3_column_text(stmt, 3);
-    const char *current_contact = (const char*)sqlite3_column_text(stmt, 4);
-    const char *current_address = (const char*)sqlite3_column_text(stmt, 5);
-    const char *current_disease = (const char*)sqlite3_column_text(stmt, 6);
+    const unsigned char *current_gender = sqlite3_column_text(stmt, 3);
+    const unsigned char *current_contact = sqlite3_column_text(stmt, 4);
+    const unsigned char *current_address = sqlite3_column_text(stmt, 5);
+    const unsigned char *current_disease = sqlite3_column_text(stmt, 6);
     
     sqlite3_finalize(stmt);
     
     printf("\nCurrent Information:\n");
-    printf("Name: %s\n", current_name);
+    printf("Name: %s\n", current_name ? (const char*)current_name : "N/A");
     printf("Age: %d\n", current_age);
-    printf("Gender: %s\n", current_gender);
-    printf("Contact: %s\n", current_contact);
-    printf("Address: %s\n", current_address);
-    printf("Disease: %s\n", current_disease);
+    printf("Gender: %s\n", current_gender ? (const char*)current_gender : "N/A");
+    printf("Contact: %s\n", current_contact ? (const char*)current_contact : "N/A");
+    printf("Address: %s\n", current_address ? (const char*)current_address : "N/A");
+    printf("Disease: %s\n", current_disease ? (const char*)current_disease : "N/A");
     
     printf("\nEnter new information (press Enter to keep current):\n");
     
@@ -556,49 +618,60 @@ void update_patient() {
     int age;
     char input[100];
     
-    printf("Name [%s]: ", current_name);
+    printf("Name [%s]: ", current_name ? (const char*)current_name : "");
     fgets(input, sizeof(input), stdin);
     input[strcspn(input, "\n")] = 0;
-    strcpy(name, strlen(input) > 0 ? input : current_name);
+    strcpy(name, strlen(input) > 0 ? input : (current_name ? (const char*)current_name : ""));
     
     printf("Age [%d]: ", current_age);
     fgets(input, sizeof(input), stdin);
     input[strcspn(input, "\n")] = 0;
     age = strlen(input) > 0 ? atoi(input) : current_age;
     
-    printf("Gender [%s]: ", current_gender);
+    printf("Gender [%s]: ", current_gender ? (const char*)current_gender : "");
     fgets(input, sizeof(input), stdin);
     input[strcspn(input, "\n")] = 0;
-    strcpy(gender, strlen(input) > 0 ? input : current_gender);
+    strcpy(gender, strlen(input) > 0 ? input : (current_gender ? (const char*)current_gender : ""));
     
-    printf("Contact [%s]: ", current_contact);
+    printf("Contact [%s]: ", current_contact ? (const char*)current_contact : "");
     fgets(input, sizeof(input), stdin);
     input[strcspn(input, "\n")] = 0;
-    strcpy(contact, strlen(input) > 0 ? input : current_contact);
+    strcpy(contact, strlen(input) > 0 ? input : (current_contact ? (const char*)current_contact : ""));
     
-    printf("Address [%s]: ", current_address);
+    printf("Address [%s]: ", current_address ? (const char*)current_address : "");
     fgets(input, sizeof(input), stdin);
     input[strcspn(input, "\n")] = 0;
-    strcpy(address, strlen(input) > 0 ? input : current_address);
+    strcpy(address, strlen(input) > 0 ? input : (current_address ? (const char*)current_address : ""));
     
-    printf("Disease [%s]: ", current_disease);
+    printf("Disease [%s]: ", current_disease ? (const char*)current_disease : "");
     fgets(input, sizeof(input), stdin);
     input[strcspn(input, "\n")] = 0;
-    strcpy(disease, strlen(input) > 0 ? input : current_disease);
+    strcpy(disease, strlen(input) > 0 ? input : (current_disease ? (const char*)current_disease : ""));
     
-    // Update database
-    snprintf(sql, sizeof(sql),
-        "UPDATE patients SET name = '%s', age = %d, gender = '%s', "
-        "contact = '%s', address = '%s', disease = '%s' "
-        "WHERE id = %d",
-        name, age, gender, contact, address, disease, patient_id);
+    // Update database using parameterized query
+    sql = "UPDATE patients SET name = ?, age = ?, gender = ?, "
+          "contact = ?, address = ?, disease = ? WHERE id = ?";
     
-    char *err_msg = 0;
-    int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+        printf("Database error: %s\n", sqlite3_errmsg(db));
+        printf("\nPress Enter to continue...");
+        getchar();
+        return;
+    }
     
-    if (rc != SQLITE_OK) {
-        printf("\n❌ Error updating patient: %s\n", err_msg);
-        sqlite3_free(err_msg);
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, age);
+    sqlite3_bind_text(stmt, 3, gender, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, contact, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, address, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, disease, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 7, patient_id);
+    
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        printf("\n❌ Error updating patient: %s\n", sqlite3_errmsg(db));
     } else {
         printf("\n✅ Patient updated successfully!\n");
     }
@@ -614,10 +687,9 @@ void delete_patient() {
     int patient_id = get_integer("Enter Patient ID to delete: ", 1, 99999);
     
     // Check if patient exists
-    char sql[500];
-    snprintf(sql, sizeof(sql), "SELECT name FROM patients WHERE id = %d", patient_id);
-    
+    const char *sql = "SELECT name FROM patients WHERE id = ?";
     sqlite3_stmt *stmt;
+    
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK || 
         sqlite3_step(stmt) != SQLITE_ROW) {
         printf("Patient not found!\n");
@@ -627,10 +699,10 @@ void delete_patient() {
         return;
     }
     
-    const char *patient_name = (const char*)sqlite3_column_text(stmt, 0);
+    const unsigned char *patient_name = sqlite3_column_text(stmt, 0);
     sqlite3_finalize(stmt);
     
-    printf("\nPatient: %s (ID: %d)\n", patient_name, patient_id);
+    printf("\nPatient: %s (ID: %d)\n", patient_name ? (const char*)patient_name : "Unknown", patient_id);
     printf("WARNING: This will delete the patient and all associated bills!\n");
     printf("Are you sure? (y/n): ");
     
@@ -645,15 +717,22 @@ void delete_patient() {
         return;
     }
     
-    // Delete patient (cascade will delete bills)
-    snprintf(sql, sizeof(sql), "DELETE FROM patients WHERE id = %d", patient_id);
+    // Delete patient using parameterized query
+    sql = "DELETE FROM patients WHERE id = ?";
     
-    char *err_msg = 0;
-    int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+        printf("Database error: %s\n", sqlite3_errmsg(db));
+        printf("\nPress Enter to continue...");
+        getchar();
+        return;
+    }
     
-    if (rc != SQLITE_OK) {
-        printf("\n❌ Error deleting patient: %s\n", err_msg);
-        sqlite3_free(err_msg);
+    sqlite3_bind_int(stmt, 1, patient_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        printf("\n❌ Error deleting patient: %s\n", sqlite3_errmsg(db));
     } else {
         printf("\n✅ Patient deleted successfully!\n");
     }
@@ -674,10 +753,9 @@ void generate_bill() {
     int patient_id = get_integer("\nEnter Patient ID for billing: ", 1, 99999);
     
     // Get patient name
-    char sql[500];
-    snprintf(sql, sizeof(sql), "SELECT name FROM patients WHERE id = %d", patient_id);
-    
+    const char *sql = "SELECT name FROM patients WHERE id = ?";
     sqlite3_stmt *stmt;
+    
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK || 
         sqlite3_step(stmt) != SQLITE_ROW) {
         printf("Patient not found!\n");
@@ -687,10 +765,10 @@ void generate_bill() {
         return;
     }
     
-    const char *patient_name = (const char*)sqlite3_column_text(stmt, 0);
+    const unsigned char *patient_name = sqlite3_column_text(stmt, 0);
     sqlite3_finalize(stmt);
     
-    printf("\nGenerating bill for: %s (ID: %d)\n", patient_name, patient_id);
+    printf("\nGenerating bill for: %s (ID: %d)\n", patient_name ? (const char*)patient_name : "Unknown", patient_id);
     printf("════════════════════════════════════════════════════\n");
     
     float room_charges = get_float("Room charges: $", 0, 10000);
@@ -743,27 +821,42 @@ void generate_bill() {
     
     float balance_due = total_amount - amount_paid;
     
-    // Insert bill
-    snprintf(sql, sizeof(sql),
-        "INSERT INTO bills (patient_id, patient_name, room_charges, doctor_fees, "
-        "medicine_charges, lab_charges, other_charges, total_amount, amount_paid, "
-        "balance_due, payment_status, payment_method) "
-        "VALUES (%d, '%s', %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, '%s', '%s')",
-        patient_id, patient_name, room_charges, doctor_fees, medicine_charges,
-        lab_charges, other_charges, total_amount, amount_paid, balance_due,
-        payment_status, payment_method);
+    // Insert bill using parameterized query
+    sql = "INSERT INTO bills (patient_id, patient_name, room_charges, doctor_fees, "
+          "medicine_charges, lab_charges, other_charges, total_amount, amount_paid, "
+          "balance_due, payment_status, payment_method) "
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     
-    char *err_msg = 0;
-    int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+        printf("Database error: %s\n", sqlite3_errmsg(db));
+        printf("\nPress Enter to continue...");
+        getchar();
+        return;
+    }
     
-    if (rc != SQLITE_OK) {
-        printf("\n❌ Error generating bill: %s\n", err_msg);
-        sqlite3_free(err_msg);
+    sqlite3_bind_int(stmt, 1, patient_id);
+    sqlite3_bind_text(stmt, 2, patient_name ? (const char*)patient_name : "Unknown", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 3, room_charges);
+    sqlite3_bind_double(stmt, 4, doctor_fees);
+    sqlite3_bind_double(stmt, 5, medicine_charges);
+    sqlite3_bind_double(stmt, 6, lab_charges);
+    sqlite3_bind_double(stmt, 7, other_charges);
+    sqlite3_bind_double(stmt, 8, total_amount);
+    sqlite3_bind_double(stmt, 9, amount_paid);
+    sqlite3_bind_double(stmt, 10, balance_due);
+    sqlite3_bind_text(stmt, 11, payment_status, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 12, payment_method, -1, SQLITE_STATIC);
+    
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        printf("\n❌ Error generating bill: %s\n", sqlite3_errmsg(db));
     } else {
         long long bill_no = sqlite3_last_insert_rowid(db);
         printf("\n✅ Bill generated successfully!\n");
         printf("   Bill Number: %lld\n", bill_no);
-        printf("   Patient: %s\n", patient_name);
+        printf("   Patient: %s\n", patient_name ? (const char*)patient_name : "Unknown");
         printf("   Total Amount: $%.2f\n", total_amount);
         printf("   Amount Paid: $%.2f\n", amount_paid);
         printf("   Balance Due: $%.2f\n", balance_due);
@@ -771,11 +864,14 @@ void generate_bill() {
         
         // Record payment if any
         if (amount_paid > 0) {
-            snprintf(sql, sizeof(sql),
-                "INSERT INTO payments (bill_no, amount, payment_method) "
-                "VALUES (%lld, %.2f, '%s')",
-                bill_no, amount_paid, payment_method);
-            sqlite3_exec(db, sql, 0, 0, 0);
+            sql = "INSERT INTO payments (bill_no, amount, payment_method) VALUES (?, ?, ?)";
+            if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, bill_no);
+                sqlite3_bind_double(stmt, 2, amount_paid);
+                sqlite3_bind_text(stmt, 3, payment_method, -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
         }
     }
     
@@ -792,7 +888,7 @@ void view_bills() {
     sqlite3_stmt *stmt;
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
-        printf("Error fetching bills\n");
+        printf("Error fetching bills: %s\n", sqlite3_errmsg(db));
         printf("\nPress Enter to continue...");
         getchar();
         return;
@@ -807,15 +903,21 @@ void view_bills() {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         count++;
         int bill_no = sqlite3_column_int(stmt, 0);
-        const char *patient_name = (const char*)sqlite3_column_text(stmt, 1);
+        const unsigned char *patient_name = sqlite3_column_text(stmt, 1);
         float total_amount = sqlite3_column_double(stmt, 2);
         float amount_paid = sqlite3_column_double(stmt, 3);
         float balance_due = sqlite3_column_double(stmt, 4);
-        const char *payment_status = (const char*)sqlite3_column_text(stmt, 5);
-        const char *bill_date = (const char*)sqlite3_column_text(stmt, 6);
+        const unsigned char *payment_status = sqlite3_column_text(stmt, 5);
+        const unsigned char *bill_date = sqlite3_column_text(stmt, 6);
         
         printf("%-8d %-25s $%-9.2f $%-9.2f $%-9.2f %-10s %s\n", 
-               bill_no, patient_name, total_amount, amount_paid, balance_due, payment_status, bill_date);
+               bill_no, 
+               patient_name ? (const char*)patient_name : "Unknown",
+               total_amount, 
+               amount_paid, 
+               balance_due,
+               payment_status ? (const char*)payment_status : "Unknown",
+               bill_date ? (const char*)bill_date : "Unknown");
         
         total_billed += total_amount;
         total_paid += amount_paid;
@@ -844,10 +946,9 @@ void search_bill() {
     
     int bill_no = get_integer("Enter Bill Number: ", 1, 999999);
     
-    char sql[500];
-    snprintf(sql, sizeof(sql), "SELECT * FROM bills WHERE bill_no = %d", bill_no);
-    
+    const char *sql = "SELECT * FROM bills WHERE bill_no = ?";
     sqlite3_stmt *stmt;
+    
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK || 
         sqlite3_step(stmt) != SQLITE_ROW) {
         printf("Bill not found!\n");
@@ -858,8 +959,8 @@ void search_bill() {
     }
     
     int patient_id = sqlite3_column_int(stmt, 1);
-    const char *patient_name = (const char*)sqlite3_column_text(stmt, 2);
-    const char *bill_date = (const char*)sqlite3_column_text(stmt, 3);
+    const unsigned char *patient_name = sqlite3_column_text(stmt, 2);
+    const unsigned char *bill_date = sqlite3_column_text(stmt, 3);
     float room_charges = sqlite3_column_double(stmt, 4);
     float doctor_fees = sqlite3_column_double(stmt, 5);
     float medicine_charges = sqlite3_column_double(stmt, 6);
@@ -868,15 +969,15 @@ void search_bill() {
     float total_amount = sqlite3_column_double(stmt, 9);
     float amount_paid = sqlite3_column_double(stmt, 10);
     float balance_due = sqlite3_column_double(stmt, 11);
-    const char *payment_status = (const char*)sqlite3_column_text(stmt, 12);
-    const char *payment_method = (const char*)sqlite3_column_text(stmt, 13);
+    const unsigned char *payment_status = sqlite3_column_text(stmt, 12);
+    const unsigned char *payment_method = sqlite3_column_text(stmt, 13);
     
     sqlite3_finalize(stmt);
     
     printf("\nBill Details:\n");
     printf("════════════════════════════════════════════════════\n");
-    printf("Bill No: %d | Date: %s\n", bill_no, bill_date);
-    printf("Patient: %s (ID: %d)\n", patient_name, patient_id);
+    printf("Bill No: %d | Date: %s\n", bill_no, bill_date ? (const char*)bill_date : "Unknown");
+    printf("Patient: %s (ID: %d)\n", patient_name ? (const char*)patient_name : "Unknown", patient_id);
     printf("════════════════════════════════════════════════════\n");
     printf("Room Charges:        $%10.2f\n", room_charges);
     printf("Doctor Fees:         $%10.2f\n", doctor_fees);
@@ -888,8 +989,8 @@ void search_bill() {
     printf("Amount Paid:         $%10.2f\n", amount_paid);
     printf("Balance Due:         $%10.2f\n", balance_due);
     printf("════════════════════════════════════════════════════\n");
-    printf("Payment Status:      %s\n", payment_status);
-    printf("Payment Method:      %s\n", payment_method);
+    printf("Payment Status:      %s\n", payment_status ? (const char*)payment_status : "Unknown");
+    printf("Payment Method:      %s\n", payment_method ? (const char*)payment_method : "Unknown");
     
     printf("\nPress Enter to continue...");
     getchar();
@@ -905,7 +1006,7 @@ void make_payment() {
     sqlite3_stmt *stmt;
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
-        printf("Error fetching bills\n");
+        printf("Error fetching bills: %s\n", sqlite3_errmsg(db));
         printf("\nPress Enter to continue...");
         getchar();
         return;
@@ -921,13 +1022,17 @@ void make_payment() {
     
     while (sqlite3_step(stmt) == SQLITE_ROW && bill_count < 100) {
         int bill_no = sqlite3_column_int(stmt, 0);
-        const char *patient_name = (const char*)sqlite3_column_text(stmt, 1);
+        const unsigned char *patient_name = sqlite3_column_text(stmt, 1);
         float total_amount = sqlite3_column_double(stmt, 2);
         float amount_paid = sqlite3_column_double(stmt, 3);
         float balance_due = sqlite3_column_double(stmt, 4);
         
         printf("%-8d %-25s $%-9.2f $%-9.2f $%-9.2f\n", 
-               bill_no, patient_name, total_amount, amount_paid, balance_due);
+               bill_no, 
+               patient_name ? (const char*)patient_name : "Unknown",
+               total_amount, 
+               amount_paid, 
+               balance_due);
         
         bills[bill_count] = bill_no;
         balances[bill_count] = balance_due;
@@ -983,40 +1088,52 @@ void make_payment() {
         case 4: strcpy(payment_method, "Online Transfer"); break;
     }
     
-    // Update bill
-    char update_sql[500];
-    snprintf(update_sql, sizeof(update_sql),
-        "UPDATE bills SET amount_paid = amount_paid + %.2f, "
-        "balance_due = balance_due - %.2f WHERE bill_no = %d",
-        payment_amount, payment_amount, bill_no);
+    // Update bill using parameterized query
+    sql = "UPDATE bills SET amount_paid = amount_paid + ?, "
+          "balance_due = balance_due - ? WHERE bill_no = ?";
     
-    char *err_msg = 0;
-    int rc = sqlite3_exec(db, update_sql, 0, 0, &err_msg);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+        printf("Database error: %s\n", sqlite3_errmsg(db));
+        printf("\nPress Enter to continue...");
+        getchar();
+        return;
+    }
     
-    if (rc != SQLITE_OK) {
-        printf("Payment failed: %s\n", err_msg);
-        sqlite3_free(err_msg);
+    sqlite3_bind_double(stmt, 1, payment_amount);
+    sqlite3_bind_double(stmt, 2, payment_amount);
+    sqlite3_bind_int(stmt, 3, bill_no);
+    
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        printf("Payment failed: %s\n", sqlite3_errmsg(db));
         printf("\nPress Enter to continue...");
         getchar();
         return;
     }
     
     // Update status if fully paid
-    snprintf(update_sql, sizeof(update_sql),
-        "UPDATE bills SET payment_status = CASE "
-        "WHEN balance_due <= 0 THEN 'Paid' "
-        "ELSE 'Partial' END WHERE bill_no = %d",
-        bill_no);
+    sql = "UPDATE bills SET payment_status = CASE "
+          "WHEN balance_due <= 0 THEN 'Paid' "
+          "ELSE 'Partial' END WHERE bill_no = ?";
     
-    sqlite3_exec(db, update_sql, 0, 0, 0);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, bill_no);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
     
     // Record payment
-    snprintf(update_sql, sizeof(update_sql),
-        "INSERT INTO payments (bill_no, amount, payment_method) "
-        "VALUES (%d, %.2f, '%s')",
-        bill_no, payment_amount, payment_method);
+    sql = "INSERT INTO payments (bill_no, amount, payment_method) VALUES (?, ?, ?)";
     
-    sqlite3_exec(db, update_sql, 0, 0, 0);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, bill_no);
+        sqlite3_bind_double(stmt, 2, payment_amount);
+        sqlite3_bind_text(stmt, 3, payment_method, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
     
     printf("\n✅ Payment of $%.2f recorded successfully!\n", payment_amount);
     
@@ -1030,26 +1147,29 @@ void view_payment_history() {
     
     int bill_no = get_integer("Enter Bill Number (0 for all payments): ", 0, 999999);
     
-    char sql[500];
+    const char *sql;
     if (bill_no == 0) {
-        strcpy(sql, "SELECT p.payment_id, p.bill_no, b.patient_name, p.amount, "
-                    "p.payment_method, p.payment_date "
-                    "FROM payments p JOIN bills b ON p.bill_no = b.bill_no "
-                    "ORDER BY p.payment_date DESC");
+        sql = "SELECT p.payment_id, p.bill_no, b.patient_name, p.amount, "
+              "p.payment_method, p.payment_date "
+              "FROM payments p JOIN bills b ON p.bill_no = b.bill_no "
+              "ORDER BY p.payment_date DESC";
     } else {
-        snprintf(sql, sizeof(sql), 
-                 "SELECT p.payment_id, p.bill_no, b.patient_name, p.amount, "
-                 "p.payment_method, p.payment_date "
-                 "FROM payments p JOIN bills b ON p.bill_no = b.bill_no "
-                 "WHERE p.bill_no = %d ORDER BY p.payment_date DESC", bill_no);
+        sql = "SELECT p.payment_id, p.bill_no, b.patient_name, p.amount, "
+              "p.payment_method, p.payment_date "
+              "FROM payments p JOIN bills b ON p.bill_no = b.bill_no "
+              "WHERE p.bill_no = ? ORDER BY p.payment_date DESC";
     }
     
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
-        printf("Error fetching payment history\n");
+        printf("Error fetching payment history: %s\n", sqlite3_errmsg(db));
         printf("\nPress Enter to continue...");
         getchar();
         return;
+    }
+    
+    if (bill_no != 0) {
+        sqlite3_bind_int(stmt, 1, bill_no);
     }
     
     printf("Payment ID  Bill No  Patient Name               Amount     Method        Date\n");
@@ -1062,13 +1182,17 @@ void view_payment_history() {
         count++;
         int payment_id = sqlite3_column_int(stmt, 0);
         int bill_no = sqlite3_column_int(stmt, 1);
-        const char *patient_name = (const char*)sqlite3_column_text(stmt, 2);
+        const unsigned char *patient_name = sqlite3_column_text(stmt, 2);
         float amount = sqlite3_column_double(stmt, 3);
-        const char *payment_method = (const char*)sqlite3_column_text(stmt, 4);
-        const char *payment_date = (const char*)sqlite3_column_text(stmt, 5);
+        const unsigned char *payment_method = sqlite3_column_text(stmt, 4);
+        const unsigned char *payment_date = sqlite3_column_text(stmt, 5);
         
         printf("%-10d %-8d %-25s $%-9.2f %-12s %s\n", 
-               payment_id, bill_no, patient_name, amount, payment_method, payment_date);
+               payment_id, bill_no, 
+               patient_name ? (const char*)patient_name : "Unknown",
+               amount,
+               payment_method ? (const char*)payment_method : "Unknown",
+               payment_date ? (const char*)payment_date : "Unknown");
         
         total_amount += amount;
     }
@@ -1093,10 +1217,9 @@ void print_receipt() {
     
     int bill_no = get_integer("Enter Bill Number: ", 1, 999999);
     
-    char sql[500];
-    snprintf(sql, sizeof(sql), "SELECT * FROM bills WHERE bill_no = %d", bill_no);
-    
+    const char *sql = "SELECT * FROM bills WHERE bill_no = ?";
     sqlite3_stmt *stmt;
+    
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK || 
         sqlite3_step(stmt) != SQLITE_ROW) {
         printf("Bill not found!\n");
@@ -1107,8 +1230,8 @@ void print_receipt() {
     }
     
     int patient_id = sqlite3_column_int(stmt, 1);
-    const char *patient_name = (const char*)sqlite3_column_text(stmt, 2);
-    const char *bill_date = (const char*)sqlite3_column_text(stmt, 3);
+    const unsigned char *patient_name = sqlite3_column_text(stmt, 2);
+    const unsigned char *bill_date = sqlite3_column_text(stmt, 3);
     float room_charges = sqlite3_column_double(stmt, 4);
     float doctor_fees = sqlite3_column_double(stmt, 5);
     float medicine_charges = sqlite3_column_double(stmt, 6);
@@ -1117,8 +1240,8 @@ void print_receipt() {
     float total_amount = sqlite3_column_double(stmt, 9);
     float amount_paid = sqlite3_column_double(stmt, 10);
     float balance_due = sqlite3_column_double(stmt, 11);
-    const char *payment_status = (const char*)sqlite3_column_text(stmt, 12);
-    const char *payment_method = (const char*)sqlite3_column_text(stmt, 13);
+    const unsigned char *payment_status = sqlite3_column_text(stmt, 12);
+    const unsigned char *payment_method = sqlite3_column_text(stmt, 13);
     
     sqlite3_finalize(stmt);
     
@@ -1130,9 +1253,9 @@ void print_receipt() {
     printf("║ City General Hospital                                        ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
     printf("║  Receipt No: %-45d ║\n", bill_no);
-    printf("║  Date:       %-45s ║\n", bill_date);
+    printf("║  Date:       %-45s ║\n", bill_date ? (const char*)bill_date : "Unknown");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║  Patient: %-50s ║\n", patient_name);
+    printf("║  Patient: %-50s ║\n", patient_name ? (const char*)patient_name : "Unknown");
     printf("║  Patient ID: %-48d ║\n", patient_id);
     printf("╠══════════════════════════════════════════════════════════════╣\n");
     printf("║                                                              ║\n");
@@ -1146,8 +1269,8 @@ void print_receipt() {
     printf("║  AMOUNT PAID ............................... $%10.2f  ║\n", amount_paid);
     printf("║  BALANCE DUE ............................... $%10.2f  ║\n", balance_due);
     printf("║                                                              ║\n");
-    printf("║  Payment Status: %-10s                                 ║\n", payment_status);
-    printf("║  Payment Method: %-10s                                 ║\n", payment_method);
+    printf("║  Payment Status: %-10s                                 ║\n", payment_status ? (const char*)payment_status : "Unknown");
+    printf("║  Payment Method: %-10s                                 ║\n", payment_method ? (const char*)payment_method : "Unknown");
     printf("║                                                              ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
     printf("║  Thank you for choosing our hospital!                        ║\n");
@@ -1166,13 +1289,14 @@ void print_receipt() {
         snprintf(filename, sizeof(filename), "receipt_%d.txt", bill_no);
         FILE *file = fopen(filename, "w");
         if (file) {
+            // Save receipt with UTF-8 encoding
             fprintf(file, "Receipt No: %d\n", bill_no);
-            fprintf(file, "Date: %s\n", bill_date);
-            fprintf(file, "Patient: %s (ID: %d)\n", patient_name, patient_id);
+            fprintf(file, "Date: %s\n", bill_date ? (const char*)bill_date : "Unknown");
+            fprintf(file, "Patient: %s (ID: %d)\n", patient_name ? (const char*)patient_name : "Unknown", patient_id);
             fprintf(file, "Total Amount: $%.2f\n", total_amount);
             fprintf(file, "Amount Paid: $%.2f\n", amount_paid);
             fprintf(file, "Balance Due: $%.2f\n", balance_due);
-            fprintf(file, "Status: %s\n", payment_status);
+            fprintf(file, "Status: %s\n", payment_status ? (const char*)payment_status : "Unknown");
             fclose(file);
             printf("\n✅ Receipt saved to: %s\n", filename);
         } else {
@@ -1206,7 +1330,7 @@ void generate_report() {
         
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
-            printf("Error generating report\n");
+            printf("Error generating report: %s\n", sqlite3_errmsg(db));
             printf("\nPress Enter to continue...");
             getchar();
             return;
@@ -1223,14 +1347,19 @@ void generate_report() {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             count++;
             int bill_no = sqlite3_column_int(stmt, 0);
-            const char *patient_name = (const char*)sqlite3_column_text(stmt, 1);
+            const unsigned char *patient_name = sqlite3_column_text(stmt, 1);
             float total_amount = sqlite3_column_double(stmt, 2);
             float amount_paid = sqlite3_column_double(stmt, 3);
             float balance_due = sqlite3_column_double(stmt, 4);
-            const char *bill_date = (const char*)sqlite3_column_text(stmt, 5);
+            const unsigned char *bill_date = sqlite3_column_text(stmt, 5);
             
             printf("%-8d %-25s $%-9.2f $%-9.2f $%-9.2f %s\n", 
-                   bill_no, patient_name, total_amount, amount_paid, balance_due, bill_date);
+                   bill_no, 
+                   patient_name ? (const char*)patient_name : "Unknown",
+                   total_amount, 
+                   amount_paid, 
+                   balance_due,
+                   bill_date ? (const char*)bill_date : "Unknown");
             
             total_outstanding += balance_due;
         }
@@ -1243,14 +1372,13 @@ void generate_report() {
         
     } else {
         // Summary report
-        char sql[500];
-        strcpy(sql, "SELECT COUNT(*), SUM(total_amount), SUM(amount_paid), "
-                    "SUM(balance_due) FROM bills");
+        const char *sql = "SELECT COUNT(*), SUM(total_amount), SUM(amount_paid), "
+                         "SUM(balance_due) FROM bills";
         
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK || 
             sqlite3_step(stmt) != SQLITE_ROW) {
-            printf("Error generating report\n");
+            printf("Error generating report: %s\n", sqlite3_errmsg(db));
             sqlite3_finalize(stmt);
             printf("\nPress Enter to continue...");
             getchar();
@@ -1353,7 +1481,7 @@ void backup_database() {
     
     int rc = sqlite3_open(backup_name, &backup_db);
     if (rc != SQLITE_OK) {
-        printf("Cannot create backup file\n");
+        printf("Cannot create backup file: %s\n", sqlite3_errmsg(backup_db));
         sqlite3_close(backup_db);
         printf("\nPress Enter to continue...");
         getchar();
@@ -1386,7 +1514,7 @@ void backup_database() {
         printf("\nRecent backups:\n");
         system("ls -la backups/*.db 2>/dev/null | tail -5");
     } else {
-        printf("\n❌ Backup failed!\n");
+        printf("\n❌ Backup failed: %s\n", sqlite3_errstr(rc));
     }
     
     printf("\nPress Enter to continue...");
@@ -1454,9 +1582,13 @@ void restore_database() {
     // Reopen database
     int rc = sqlite3_open("hospital.db", &db);
     if (rc != SQLITE_OK) {
-        printf("Failed to restore database\n");
+        printf("Failed to restore database: %s\n", sqlite3_errmsg(db));
         exit(1);
     }
+    
+    // Set UTF-8 encoding for restored database
+    sqlite3_exec(db, "PRAGMA encoding = 'UTF-8';", 0, 0, 0);
+    sqlite3_exec(db, "PRAGMA foreign_keys = ON;", 0, 0, 0);
     
     printf("✅ Database restored successfully from: %s\n", backup_name);
     
@@ -1476,20 +1608,91 @@ void export_data() {
     
     int choice = get_choice(1, 3);
     
+    char *filename;
+    char *table_name;
+    
     switch(choice) {
         case 1:
-            system("sqlite3 hospital.db -csv 'SELECT * FROM patients;' > patients.csv 2>/dev/null");
-            printf("✅ Patients exported to patients.csv\n");
+            filename = "patients.csv";
+            table_name = "patients";
             break;
         case 2:
-            system("sqlite3 hospital.db -csv 'SELECT * FROM bills;' > bills.csv 2>/dev/null");
-            printf("✅ Bills exported to bills.csv\n");
+            filename = "bills.csv";
+            table_name = "bills";
             break;
         case 3:
-            system("sqlite3 hospital.db -csv 'SELECT * FROM payments;' > payments.csv 2>/dev/null");
-            printf("✅ Payments exported to payments.csv\n");
+            filename = "payments.csv";
+            table_name = "payments";
             break;
+        default:
+            return;
     }
+    
+    // Create CSV file with UTF-8 encoding
+    FILE *csv_file = fopen(filename, "w");
+    if (!csv_file) {
+        printf("❌ Error creating file: %s\n", filename);
+        printf("\nPress Enter to continue...");
+        getchar();
+        return;
+    }
+    
+    // Add UTF-8 BOM for Excel compatibility
+    unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    fwrite(bom, 1, 3, csv_file);
+    
+    // Get data from database
+    char sql[200];
+    snprintf(sql, sizeof(sql), "SELECT * FROM %s", table_name);
+    
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    
+    if (rc != SQLITE_OK) {
+        printf("❌ Error exporting data: %s\n", sqlite3_errmsg(db));
+        fclose(csv_file);
+        printf("\nPress Enter to continue...");
+        getchar();
+        return;
+    }
+    
+    // Write CSV header
+    int column_count = sqlite3_column_count(stmt);
+    for (int i = 0; i < column_count; i++) {
+        if (i > 0) fprintf(csv_file, ",");
+        fprintf(csv_file, "\"%s\"", sqlite3_column_name(stmt, i));
+    }
+    fprintf(csv_file, "\n");
+    
+    // Write data rows
+    int row_count = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        for (int i = 0; i < column_count; i++) {
+            if (i > 0) fprintf(csv_file, ",");
+            
+            const unsigned char *text = sqlite3_column_text(stmt, i);
+            if (text && sqlite3_column_type(stmt, i) != SQLITE_NULL) {
+                // Escape quotes in CSV
+                fprintf(csv_file, "\"");
+                for (const unsigned char *c = text; *c; c++) {
+                    if (*c == '"') fprintf(csv_file, "\"\"");
+                    else if (*c == '\n' || *c == '\r') fprintf(csv_file, " ");
+                    else fprintf(csv_file, "%c", *c);
+                }
+                fprintf(csv_file, "\"");
+            } else {
+                fprintf(csv_file, "\"\"");
+            }
+        }
+        fprintf(csv_file, "\n");
+        row_count++;
+    }
+    
+    sqlite3_finalize(stmt);
+    fclose(csv_file);
+    
+    printf("✅ Exported %d rows to %s\n", row_count, filename);
+    printf("   File encoded in UTF-8 with BOM for Excel compatibility.\n");
     
     printf("\nPress Enter to continue...");
     getchar();
