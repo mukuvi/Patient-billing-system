@@ -13,4 +13,4 @@ A complete patient billing system available in both **GUI** (Python) and **Comma
 
 ## Installation
 
-For complete installation instructions, see [INSTALLATION.md](INSTALLATION.md)
+For complete installation instructions, see [INSTALLATION.md](NSTALLATION_GUIDE.md)
