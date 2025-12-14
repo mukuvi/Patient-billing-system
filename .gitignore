@@ -1,0 +1,65 @@
+# ===========================================
+# HOSPITAL BILLING SYSTEM - GIT IGNORE FILE
+# ===========================================
+
+# Database files
+*.db
+*.db-*
+backups/
+
+# Compiled binaries
+hospital_billing
+*.exe
+*.out
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# Logs
+*.log
+*.log.*
+
+# Generated files
+receipt_*.txt
+patients.csv
+bills.csv
+payments.csv
+financial_summary.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# C object files
+*.o
+*.so
+*.dll
+
+# Application specific
+**/hospital.db
+**/hospital_billing
+**/backups/
