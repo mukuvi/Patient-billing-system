@@ -1464,36 +1464,6 @@ void restore_database() {
     getchar();
 }
 
-// void export_data() {
-//     clear_screen();
-//     print_header("EXPORT DATA");
-    
-//     printf("Select data to export:\n");
-//     printf("1. Patients (CSV)\n");
-//     printf("2. Bills (CSV)\n");
-//     printf("3. Payments (CSV)\n");
-//     printf("Enter choice: ");
-    
-//     int choice = get_choice(1, 3);
-    
-//     switch(choice) {
-//         case 1:
-//             system("sqlite3 hospital.db -csv 'SELECT * FROM patients;' > patients.csv 2>/dev/null");
-//             printf("✅ Patients exported to patients.csv\n");
-//             break;
-//         case 2:
-//             system("sqlite3 hospital.db -csv 'SELECT * FROM bills;' > bills.csv 2>/dev/null");
-//             printf("✅ Bills exported to bills.csv\n");
-//             break;
-//         case 3:
-//             system("sqlite3 hospital.db -csv 'SELECT * FROM payments;' > payments.csv 2>/dev/null");
-//             printf("✅ Payments exported to payments.csv\n");
-//             break;
-//     }
-    
-//     printf("\nPress Enter to continue...");
-//     getchar();
-// }
 void export_data() {
     clear_screen();
     print_header("EXPORT DATA");
@@ -1506,86 +1476,20 @@ void export_data() {
     
     int choice = get_choice(1, 3);
     
-    // Use proper encoding for CSV export
-    char *filename;
-    char *table_name;
-    
     switch(choice) {
         case 1:
-            filename = "patients.csv";
-            table_name = "patients";
+            system("sqlite3 hospital.db -csv 'SELECT * FROM patients;' > patients.csv 2>/dev/null");
+            printf("✅ Patients exported to patients.csv\n");
             break;
         case 2:
-            filename = "bills.csv";
-            table_name = "bills";
+            system("sqlite3 hospital.db -csv 'SELECT * FROM bills;' > bills.csv 2>/dev/null");
+            printf("✅ Bills exported to bills.csv\n");
             break;
         case 3:
-            filename = "payments.csv";
-            table_name = "payments";
+            system("sqlite3 hospital.db -csv 'SELECT * FROM payments;' > payments.csv 2>/dev/null");
+            printf("✅ Payments exported to payments.csv\n");
             break;
-        default:
-            return;
     }
-    
-    // Create CSV file manually with proper encoding
-    FILE *csv_file = fopen(filename, "w");
-    if (!csv_file) {
-        printf("❌ Error creating file: %s\n", filename);
-        printf("\nPress Enter to continue...");
-        getchar();
-        return;
-    }
-    
-    // Get data from database
-    char sql[200];
-    snprintf(sql, sizeof(sql), "SELECT * FROM %s", table_name);
-    
-    sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
-    
-    if (rc != SQLITE_OK) {
-        printf("❌ Error exporting data: %s\n", sqlite3_errmsg(db));
-        fclose(csv_file);
-        printf("\nPress Enter to continue...");
-        getchar();
-        return;
-    }
-    
-    // Write CSV header
-    int column_count = sqlite3_column_count(stmt);
-    for (int i = 0; i < column_count; i++) {
-        if (i > 0) fprintf(csv_file, ",");
-        fprintf(csv_file, "\"%s\"", sqlite3_column_name(stmt, i));
-    }
-    fprintf(csv_file, "\n");
-    
-    // Write data rows
-    int row_count = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        for (int i = 0; i < column_count; i++) {
-            if (i > 0) fprintf(csv_file, ",");
-            
-            const char *text = (const char*)sqlite3_column_text(stmt, i);
-            if (text) {
-                // Escape quotes in CSV
-                fprintf(csv_file, "\"");
-                for (const char *c = text; *c; c++) {
-                    if (*c == '"') fprintf(csv_file, "\"\"");
-                    else fprintf(csv_file, "%c", *c);
-                }
-                fprintf(csv_file, "\"");
-            } else {
-                fprintf(csv_file, "\"\"");
-            }
-        }
-        fprintf(csv_file, "\n");
-        row_count++;
-    }
-    
-    sqlite3_finalize(stmt);
-    fclose(csv_file);
-    
-    printf("✅ Exported %d rows to %s\n", row_count, filename);
     
     printf("\nPress Enter to continue...");
     getchar();
