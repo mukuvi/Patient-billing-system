@@ -1,22 +1,16 @@
-# Hospital Patient Billing System
+# 🏥 Hospital Patient Billing System
 
-A complete patient billing system built with C and SQLite.
+A complete patient billing system available in both **GUI** (Python) and **Command Line** (C) versions.
 
-## Features
+## ✨ Features
 
-- Add, view, and search patients
-- Generate bills with multiple charge categories
-- Process payments and track balances
-- Generate financial reports
-- Backup and restore database
-- Search functionality for patients and bills
+- **Add, view, and search patients**
+- **Generate bills** with multiple charge categories (room, doctor, medicine, lab, other)
+- **Process payments** and track balances
+- **Generate financial reports**
+- **Backup and restore database**
+- **Search functionality** for patients and bills
 
-## Installation
+## 🚀 Installation
 
-### Quick Setup
-```bash
-# Make setup script executable
-chmod +x scripts/setup.sh
-
-# Run setup
-./scripts/setup.sh
+For complete installation instructions, see [INSTALLATION.md](INSTALLATION.md)
